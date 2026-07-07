@@ -279,3 +279,79 @@ def get_topics(db: Session = Depends(get_db)):
         }
         for t in topics
     ]
+@vocab_router.post("/user/add")
+def add_to_user_vocab(
+    data: dict,
+    db: Session = Depends(get_db)
+):
+    from app.models.models import User, UserVocabulary
+    from datetime import datetime
+
+    telegram_id = data.get("telegram_id")
+    vocab_id = data.get("vocab_id")
+
+    user = db.query(User).filter(
+        User.telegram_id == telegram_id
+    ).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Foydalanuvchi topilmadi")
+
+    existing = db.query(UserVocabulary).filter(
+        UserVocabulary.user_id == user.id,
+        UserVocabulary.vocab_id == vocab_id
+    ).first()
+    if existing:
+        return {"status": "already_exists"}
+
+    uv = UserVocabulary(
+        user_id=user.id,
+        vocab_id=vocab_id,
+        source=data.get("source", "manual"),
+        status="new",
+        ease_factor=2.5,
+        interval_days=1,
+        next_review_at=datetime.utcnow()
+    )
+    db.add(uv)
+    db.commit()
+    return {"status": "saved"}
+
+
+@vocab_router.get("/user/{telegram_id}")
+def get_user_vocab(
+    telegram_id: int,
+    db: Session = Depends(get_db)
+):
+    from app.models.models import User, UserVocabulary
+
+    user = db.query(User).filter(
+        User.telegram_id == telegram_id
+    ).first()
+    if not user:
+        return {"words": []}
+
+    user_vocabs = db.query(UserVocabulary).filter(
+        UserVocabulary.user_id == user.id
+    ).all()
+
+    result = []
+    for uv in user_vocabs:
+        w = db.query(Vocabulary).filter(
+            Vocabulary.id == uv.vocab_id
+        ).first()
+        if w:
+            result.append({
+                "id": w.id,
+                "word": w.word,
+                "translation_uz": w.translation_uz,
+                "word_type": w.word_type,
+                "cefr_level": w.cefr_level,
+                "example_1": w.example_1,
+                "collocations": w.collocations,
+                "word_family": w.word_family,
+                "status": uv.status,
+                "correct_count": uv.correct_count,
+                "wrong_count": uv.wrong_count,
+            })
+
+    return {"words": result}
