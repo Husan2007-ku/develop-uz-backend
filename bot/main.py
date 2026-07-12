@@ -10,7 +10,7 @@ import os
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-API_URL = "http://localhost:8001"
+API_URL = "https://develop-uz-api.onrender.com"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
