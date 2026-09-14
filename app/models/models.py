@@ -369,3 +369,30 @@ class MockExam(Base):
     status: Mapped[str] = mapped_column(
         String(20), default="active"
     )
+
+
+class SpeakingAttempt(Base):
+    __tablename__ = "speaking_attempts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True
+    )
+    question_id: Mapped[int | None] = mapped_column(
+        ForeignKey("speaking_questions.id"), nullable=True
+    )
+    part: Mapped[int] = mapped_column(Integer, default=2)
+    question_text: Mapped[str] = mapped_column(Text)
+    transcript: Mapped[str] = mapped_column(Text)
+    duration_sec: Mapped[int | None] = mapped_column(
+        nullable=True
+    )
+    ai_feedback: Mapped[dict | None] = mapped_column(
+        JSON, nullable=True
+    )
+    ai_band: Mapped[float | None] = mapped_column(
+        Float, nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        default=datetime.utcnow
+    )

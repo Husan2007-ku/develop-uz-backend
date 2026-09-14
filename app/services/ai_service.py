@@ -1,13 +1,11 @@
-import os
 import json
 from groq import Groq
 import anthropic
-from dotenv import load_dotenv
 
-load_dotenv()
+from app.core.config import settings
 
-groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-claude_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+groq_client = Groq(api_key=settings.GROQ_API_KEY)
+claude_client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
 
 
 def groq_complete(prompt: str, system: str = "", max_tokens: int = 2000) -> str:
@@ -63,6 +61,16 @@ def ai_complete(prompt: str, system: str = "", use_claude: bool = False, max_tok
     return result
 
 
+def _parse_json_response(result: str | None, fallback):
+    if not result:
+        return fallback
+    try:
+        clean = result.strip().replace("```json", "").replace("```", "").strip()
+        return json.loads(clean)
+    except Exception:
+        return fallback
+
+
 # ─── ESSAY TAHLIL (Claude) ────────────────────────────────
 def analyze_essay(essay_text: str) -> dict:
     system = """Sen professional IELTS examiner sifatida ishlaysan.
@@ -88,11 +96,7 @@ JSON formatida qaytargin:
 }}"""
 
     result = ai_complete(prompt, system, use_claude=True, max_tokens=1500)
-    try:
-        clean = result.strip().replace("```json", "").replace("```", "").strip()
-        return json.loads(clean)
-    except Exception:
-        return {"overall_band": 0, "error": "Tahlil qilishda xato"}
+    return _parse_json_response(result, {"overall_band": 0, "error": "Tahlil qilishda xato"})
 
 
 # ─── GRAMMAR CHECK (Groq) ─────────────────────────────────
@@ -118,11 +122,7 @@ JSON array formatida qaytargin:
 Xato yo'q bo'lsa: []"""
 
     result = ai_complete(prompt, system, use_claude=False, max_tokens=1000)
-    try:
-        clean = result.strip().replace("```json", "").replace("```", "").strip()
-        return json.loads(clean)
-    except Exception:
-        return []
+    return _parse_json_response(result, [])
 
 
 # ─── IDEA GENERATOR (Groq) ────────────────────────────────
@@ -153,11 +153,7 @@ JSON formatida idea generation qil:
 }}"""
 
     result = ai_complete(prompt, system, use_claude=False, max_tokens=2000)
-    try:
-        clean = result.strip().replace("```json", "").replace("```", "").strip()
-        return json.loads(clean)
-    except Exception:
-        return {"error": "Idea generatsiyada xato"}
+    return _parse_json_response(result, {"error": "Idea generatsiyada xato"})
 
 
 # ─── HIGHLIGHT DETECTOR (Groq) ────────────────────────────
@@ -184,11 +180,7 @@ JSON array:
 type qiymatlari: collocation | idiom | c1_vocab | c2_vocab"""
 
     result = ai_complete(prompt, system, use_claude=False, max_tokens=1500)
-    try:
-        clean = result.strip().replace("```json", "").replace("```", "").strip()
-        return json.loads(clean)
-    except Exception:
-        return []
+    return _parse_json_response(result, [])
 
 
 # ─── WRITING FEEDBACK (Claude) ────────────────────────────
@@ -213,12 +205,89 @@ JSON:
 }}"""
 
     result = ai_complete(prompt, system, use_claude=True, max_tokens=1500)
+    return _parse_json_response(result, {"band": 0, "error": "Feedback olishda xato"})
+
+
+# ─── SPEAKING: AUDIO TRANSKRIPSIYA (Groq Whisper) ─────────
+def transcribe_audio(file_bytes: bytes, filename: str = "audio.webm") -> str | None:
+    """Ovoz faylini matnga o'giradi. Groq'ning hosted Whisper modelidan foydalanadi —
+    alohida API kalit yoki qo'shimcha kutubxona kerak emas (groq SDK ichida bor)."""
     try:
-        clean = result.strip().replace("```json", "").replace("```", "").strip()
-        return json.loads(clean)
-    except Exception:
-        return {"band": 0, "error": "Feedback olishda xato"}
-    
+        result = groq_client.audio.transcriptions.create(
+            file=(filename, file_bytes),
+            model="whisper-large-v3-turbo",
+            language="en",
+            response_format="json",
+        )
+        text = (result.text or "").strip()
+        return text if text else None
+    except Exception as e:
+        print(f"Whisper transkripsiya xato: {e}")
+        return None
+
+
+# ─── SPEAKING: AI BAHOLASH (Claude) ───────────────────────
+def evaluate_speaking(
+    transcript: str, question: str, part: int = 2, duration_sec: int | None = None
+) -> dict:
+    """Transkript asosida IELTS Speaking javobini baholaydi.
+    Diqqat: audio faylning o'zi emas, faqat matnga o'girilgan versiyasi tahlil qilinadi —
+    shuning uchun talaffuz (pronunciation) alohida band sifatida berilmaydi;
+    foydalanuvchi buni o'z yozuvini eshitib o'zi baholashi tavsiya etiladi."""
+
+    word_count = len(transcript.split())
+    wpm_line = ""
+    if duration_sec and duration_sec > 0:
+        wpm = round(word_count / (duration_sec / 60))
+        wpm_line = f"\nGapirish tezligi: ~{wpm} so'z/daqiqa (davomiylik: {duration_sec} soniya)."
+
+    part_context = {
+        1: "Part 1 — oddiy shaxsiy savollarga qisqa, tabiiy javob kutiladi.",
+        2: "Part 2 — 1-2 daqiqalik uzluksiz monolog (cue card asosida) kutiladi.",
+        3: "Part 3 — mavzu bo'yicha chuqurroq, fikr-mulohazali muhokama kutiladi.",
+    }.get(part, "Speaking javobi.")
+
+    system = """Sen professional IELTS Speaking examinerisan.
+Faqat JSON formatida javob ber, boshqa hech narsa yozma.
+Baholashda faqat berilgan transkriptga tayan — talaffuz haqida hukm chiqarma,
+chunki senga audio emas, faqat matn berilgan."""
+
+    prompt = f"""{part_context}
+
+Savol: {question}
+
+Nomzodning javobi (ovozdan avtomatik matnga o'girilgan, shuning uchun "um", "uh" kabi
+so'zlar yoki notekis jumlalar bo'lishi mumkin — bularni fluency belgisi sifatida hisobga ol):
+
+\"\"\"{transcript}\"\"\"
+{wpm_line}
+So'zlar soni: {word_count}
+
+Quyidagi JSON formatida baho ber (band'lar 0-9 oralig'ida, 0.5 qadam bilan):
+{{
+  "band": 6.5,
+  "fluency_coherence": 6.5,
+  "lexical_resource": 6.0,
+  "grammatical_range": 7.0,
+  "feedback_uz": "Umumiy baholash o'zbek tilida, 2-3 jumla",
+  "strengths": ["...", "..."],
+  "improve_suggestions": ["...", "..."],
+  "filler_words": ["um", "like"],
+  "good_phrases": ["...", "..."],
+  "grammar_issues": ["...", "..."]
+}}"""
+
+    result = ai_complete(prompt, system, use_claude=True, max_tokens=1200)
+    data = _parse_json_response(
+        result, {"band": 0, "error": "Baholashda xato yuz berdi"}
+    )
+    if isinstance(data, dict) and "error" not in data:
+        data["word_count"] = word_count
+        if duration_sec:
+            data["duration_sec"] = duration_sec
+    return data
+
+
 def highlight_sample(text: str) -> list:
     """Sample collector uchun — tashqi matndan highlights ajratish"""
     system = "Sen IELTS vocabulary va collocation mutaxassisisina. Faqat JSON array formatida javob ber."
@@ -242,8 +311,4 @@ Matn:
 
 type: collocation | idiom | c1_vocab | c2_vocab"""
     result = ai_complete(prompt, system, use_claude=False, max_tokens=2000)
-    try:
-        clean = result.strip().replace("```json", "").replace("```", "").strip()
-        return json.loads(clean)
-    except Exception:
-        return []
+    return _parse_json_response(result, [])
