@@ -22,8 +22,9 @@ def review_word(
     db: Session = Depends(get_db),
     x_telegram_init_data: str | None = Header(default=None),
     x_bot_secret: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ):
-    verify_owner_or_bot(telegram_id, x_telegram_init_data, x_bot_secret)
+    verify_owner_or_bot(telegram_id, x_telegram_init_data, x_bot_secret, authorization)
 
     user = db.query(User).filter(User.telegram_id == telegram_id).first()
     if not user:
@@ -55,11 +56,12 @@ def get_due_words(
     db: Session = Depends(get_db),
     x_telegram_init_data: str | None = Header(default=None),
     x_bot_secret: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ):
     """Hozir takrorlanishi kerak bo'lgan so'zlar (next_review_at <= hozir)."""
     from datetime import datetime
 
-    verify_owner_or_bot(telegram_id, x_telegram_init_data, x_bot_secret)
+    verify_owner_or_bot(telegram_id, x_telegram_init_data, x_bot_secret, authorization)
 
     user = db.query(User).filter(User.telegram_id == telegram_id).first()
     if not user:

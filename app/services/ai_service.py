@@ -1,15 +1,27 @@
 import json
 from groq import Groq
 import anthropic
+from openai import OpenAI
+from google import genai
+from google.genai import types as genai_types
 
 from app.core.config import settings
 
-groq_client = Groq(api_key=settings.GROQ_API_KEY)
-claude_client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+# Har bir provider uchun client faqat kalit mavjud bo'lsa yaratiladi.
+# Kalit bo'sh bo'lsa client None qoladi — mos _complete funksiya buni
+# ko'rib, darhol None qaytaradi va zanjir keyingi providerga o'tadi.
+# Shu tufayli OPENAI_API_KEY yoki GEMINI_API_KEY sozlanmagan bo'lsa ham
+# ilova xatosiz ishga tushadi (config.py'da ular ixtiyoriy).
+groq_client = Groq(api_key=settings.GROQ_API_KEY) if settings.GROQ_API_KEY else None
+claude_client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY) if settings.ANTHROPIC_API_KEY else None
+openai_client = OpenAI(api_key=settings.OPENAI_API_KEY) if settings.OPENAI_API_KEY else None
+gemini_client = genai.Client(api_key=settings.GEMINI_API_KEY) if settings.GEMINI_API_KEY else None
 
 
-def groq_complete(prompt: str, system: str = "", max_tokens: int = 2000) -> str:
+def groq_complete(prompt: str, system: str = "", max_tokens: int = 2000) -> str | None:
     """Groq - tez va arzon"""
+    if not groq_client:
+        return None
     try:
         messages = []
         if system:
@@ -28,8 +40,10 @@ def groq_complete(prompt: str, system: str = "", max_tokens: int = 2000) -> str:
         return None
 
 
-def claude_complete(prompt: str, system: str = "", max_tokens: int = 2000) -> str:
+def claude_complete(prompt: str, system: str = "", max_tokens: int = 2000) -> str | None:
     """Claude - kuchli va aniq"""
+    if not claude_client:
+        return None
     try:
         response = claude_client.messages.create(
             model="claude-sonnet-4-6",
@@ -43,22 +57,84 @@ def claude_complete(prompt: str, system: str = "", max_tokens: int = 2000) -> st
         return None
 
 
-def ai_complete(prompt: str, system: str = "", use_claude: bool = False, max_tokens: int = 2000) -> str:
+def openai_complete(prompt: str, system: str = "", max_tokens: int = 2000, model: str = "gpt-4o-mini") -> str | None:
+    """OpenAI - fallback provider"""
+    if not openai_client:
+        return None
+    try:
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+
+        response = openai_client.chat.completions.create(
+            model=model,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=0.3,
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        print(f"OpenAI xato: {e}")
+        return None
+
+
+def gemini_complete(prompt: str, system: str = "", max_tokens: int = 2000, model: str = "gemini-1.5-flash") -> str | None:
+    """Gemini - fallback provider"""
+    if not gemini_client:
+        return None
+    try:
+        response = gemini_client.models.generate_content(
+            model=model,
+            contents=prompt,
+            config=genai_types.GenerateContentConfig(
+                system_instruction=system if system else None,
+                max_output_tokens=max_tokens,
+                temperature=0.3,
+            ),
+        )
+        return response.text
+    except Exception as e:
+        print(f"Gemini xato: {e}")
+        return None
+
+
+# ─── 4 PROVIDERLI FALLBACK ZANJIRI ─────────────────────────
+# "smart" tier (band scoring, chuqur tahlil) — eng aniq javob birinchi:
+#   Claude → OpenAI (gpt-4o) → Gemini (pro) → Groq
+# "fast" tier (grammar, idea gen, highlight) — eng tez/arzon birinchi:
+#   Groq → OpenAI (mini) → Gemini (flash) → Claude
+# Kalit sozlanmagan yoki chaqiruv xato bergan provider avtomatik
+# o'tkazib yuboriladi — barchasi ishlamasa None qaytadi.
+def _try_chain(chain: list, prompt: str, system: str, max_tokens: int) -> str | None:
+    for complete_fn in chain:
+        result = complete_fn(prompt, system, max_tokens)
+        if result:
+            return result
+    return None
+
+
+def ai_complete(prompt: str, system: str = "", use_claude: bool = False, max_tokens: int = 2000) -> str | None:
     """
     Smart router:
-    - use_claude=True  → Claude (band scoring, chuqur tahlil)
-    - use_claude=False → Groq (grammar check, highlights, idea gen)
-    Groq ishlamasa → Claude ga fallback
+    - use_claude=True  → "smart" zanjir (Claude birinchi)
+    - use_claude=False → "fast" zanjir (Groq birinchi)
     """
     if use_claude:
-        result = claude_complete(prompt, system, max_tokens)
-        if not result:
-            result = groq_complete(prompt, system, max_tokens)
+        chain = [
+            claude_complete,
+            lambda p, s, m: openai_complete(p, s, m, model="gpt-4o"),
+            lambda p, s, m: gemini_complete(p, s, m, model="gemini-1.5-pro"),
+            groq_complete,
+        ]
     else:
-        result = groq_complete(prompt, system, max_tokens)
-        if not result:
-            result = claude_complete(prompt, system, max_tokens)
-    return result
+        chain = [
+            groq_complete,
+            lambda p, s, m: openai_complete(p, s, m, model="gpt-4o-mini"),
+            lambda p, s, m: gemini_complete(p, s, m, model="gemini-1.5-flash"),
+            claude_complete,
+        ]
+    return _try_chain(chain, prompt, system, max_tokens)
 
 
 def _parse_json_response(result: str | None, fallback):
@@ -206,86 +282,6 @@ JSON:
 
     result = ai_complete(prompt, system, use_claude=True, max_tokens=1500)
     return _parse_json_response(result, {"band": 0, "error": "Feedback olishda xato"})
-
-
-# ─── SPEAKING: AUDIO TRANSKRIPSIYA (Groq Whisper) ─────────
-def transcribe_audio(file_bytes: bytes, filename: str = "audio.webm") -> str | None:
-    """Ovoz faylini matnga o'giradi. Groq'ning hosted Whisper modelidan foydalanadi —
-    alohida API kalit yoki qo'shimcha kutubxona kerak emas (groq SDK ichida bor)."""
-    try:
-        result = groq_client.audio.transcriptions.create(
-            file=(filename, file_bytes),
-            model="whisper-large-v3-turbo",
-            language="en",
-            response_format="json",
-        )
-        text = (result.text or "").strip()
-        return text if text else None
-    except Exception as e:
-        print(f"Whisper transkripsiya xato: {e}")
-        return None
-
-
-# ─── SPEAKING: AI BAHOLASH (Claude) ───────────────────────
-def evaluate_speaking(
-    transcript: str, question: str, part: int = 2, duration_sec: int | None = None
-) -> dict:
-    """Transkript asosida IELTS Speaking javobini baholaydi.
-    Diqqat: audio faylning o'zi emas, faqat matnga o'girilgan versiyasi tahlil qilinadi —
-    shuning uchun talaffuz (pronunciation) alohida band sifatida berilmaydi;
-    foydalanuvchi buni o'z yozuvini eshitib o'zi baholashi tavsiya etiladi."""
-
-    word_count = len(transcript.split())
-    wpm_line = ""
-    if duration_sec and duration_sec > 0:
-        wpm = round(word_count / (duration_sec / 60))
-        wpm_line = f"\nGapirish tezligi: ~{wpm} so'z/daqiqa (davomiylik: {duration_sec} soniya)."
-
-    part_context = {
-        1: "Part 1 — oddiy shaxsiy savollarga qisqa, tabiiy javob kutiladi.",
-        2: "Part 2 — 1-2 daqiqalik uzluksiz monolog (cue card asosida) kutiladi.",
-        3: "Part 3 — mavzu bo'yicha chuqurroq, fikr-mulohazali muhokama kutiladi.",
-    }.get(part, "Speaking javobi.")
-
-    system = """Sen professional IELTS Speaking examinerisan.
-Faqat JSON formatida javob ber, boshqa hech narsa yozma.
-Baholashda faqat berilgan transkriptga tayan — talaffuz haqida hukm chiqarma,
-chunki senga audio emas, faqat matn berilgan."""
-
-    prompt = f"""{part_context}
-
-Savol: {question}
-
-Nomzodning javobi (ovozdan avtomatik matnga o'girilgan, shuning uchun "um", "uh" kabi
-so'zlar yoki notekis jumlalar bo'lishi mumkin — bularni fluency belgisi sifatida hisobga ol):
-
-\"\"\"{transcript}\"\"\"
-{wpm_line}
-So'zlar soni: {word_count}
-
-Quyidagi JSON formatida baho ber (band'lar 0-9 oralig'ida, 0.5 qadam bilan):
-{{
-  "band": 6.5,
-  "fluency_coherence": 6.5,
-  "lexical_resource": 6.0,
-  "grammatical_range": 7.0,
-  "feedback_uz": "Umumiy baholash o'zbek tilida, 2-3 jumla",
-  "strengths": ["...", "..."],
-  "improve_suggestions": ["...", "..."],
-  "filler_words": ["um", "like"],
-  "good_phrases": ["...", "..."],
-  "grammar_issues": ["...", "..."]
-}}"""
-
-    result = ai_complete(prompt, system, use_claude=True, max_tokens=1200)
-    data = _parse_json_response(
-        result, {"band": 0, "error": "Baholashda xato yuz berdi"}
-    )
-    if isinstance(data, dict) and "error" not in data:
-        data["word_count"] = word_count
-        if duration_sec:
-            data["duration_sec"] = duration_sec
-    return data
 
 
 def highlight_sample(text: str) -> list:

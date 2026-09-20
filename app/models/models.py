@@ -20,6 +20,21 @@ class User(Base):
     username: Mapped[str | None] = mapped_column(
         String(100), nullable=True
     )
+
+    # ─── WEB AUTH (email/parol) ────────────────────────────
+    # Bot orqali kelgan userlarda bo'sh qoladi. Web orqali ro'yxatdan
+    # o'tganlarda telegram_id ustuniga sinthetik qiymat (900_000_000_000 + id)
+    # yoziladi — shu tufayli telegram_id'ga qurilgan barcha eski
+    # endpointlar (bot va Mini App) o'zgarishsiz ishlashda davom etadi.
+    email: Mapped[str | None] = mapped_column(
+        String(255), unique=True, nullable=True, index=True
+    )
+    password_hash: Mapped[str | None] = mapped_column(
+        String(255), nullable=True
+    )
+    auth_provider: Mapped[str] = mapped_column(
+        String(20), default="telegram"  # "telegram" | "web"
+    )
     subscription_type: Mapped[str] = mapped_column(
         String(20), default="free"
     )

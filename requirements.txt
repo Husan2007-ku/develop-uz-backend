@@ -45,3 +45,13 @@ typing_extensions==4.15.0
 uvicorn==0.49.0
 yarl==1.24.2
 slowapi==0.1.9
+
+# 4-provider AI fallback zanjiri uchun (versiyasiz — pip build paytida
+# eng so'nggi barqaror versiyani oladi, chunki bu yerdan PyPI'ga to'g'ridan
+# to'g'ri ulanib versiyani tekshirib bo'lmadi)
+openai>=1.50.0
+google-genai>=0.3.0
+
+# Web auth (email/parol) uchun JWT token + Pydantic EmailStr validatsiyasi
+PyJWT>=2.9.0
+email-validator>=2.2.0

@@ -6,11 +6,17 @@ from aiogram.filters import CommandStart, Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from dotenv import load_dotenv
 import os
+import random
 
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-API_URL = "https://develop-uz-api.onrender.com"
+API_URL = os.getenv("API_URL", "https://develop-uz-api.onrender.com")
+
+# Backend endi barcha shaxsiy endpointlarni himoyalaydi. Bot server-to-server
+# ishonchli manba sifatida shu maxfiy header orqali tanilishi kerak
+# (backend buni settings.BOT_TOKEN bilan solishtiradi).
+API_HEADERS = {"X-Bot-Secret": BOT_TOKEN}
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -48,6 +54,10 @@ FORGETTING_CURVE = [
 # Foydalanuvchi so'z eslatma jadvalini saqlash (xotirada)
 # Production da Redis ga ko'chirish kerak
 user_reminders: dict = {}  # {telegram_id: [{word, interval_idx, next_remind_at}]}
+
+# Foydalanuvchiga oxirgi ko'rsatilgan flashcard so'zining vocab_id'si —
+# "Bildim"/"Bilmadim" bosilganda shu id bilan backend SM-2 review chaqiriladi
+last_shown_word: dict = {}  # {telegram_id: vocab_id}
 
 
 def schedule_word_reminder(telegram_id: int, word: str, translation: str):
@@ -149,6 +159,7 @@ async def start(message: types.Message):
                     "username": user.username,
                     "band_level": "B2"
                 },
+                headers=API_HEADERS,
                 timeout=5.0
             )
         except Exception as e:
@@ -176,6 +187,7 @@ async def stats(message: types.Message):
         try:
             res = await client.get(
                 f"{API_URL}/users/{user.id}/stats",
+                headers=API_HEADERS,
                 timeout=5.0
             )
             data = res.json()
@@ -254,9 +266,24 @@ async def vocabulary(message: types.Message):
 
 @dp.message(F.text == "🃏 Flashcard")
 async def flashcard(message: types.Message):
+    telegram_id = message.from_user.id
+
     async with httpx.AsyncClient() as client:
         try:
+            # Avval jami so'zlar sonini bilamiz, so'ng tasodifiy bittasini tanlaymiz
+            # (offset'siz har doim bitta xil so'z chiqardi)
             res = await client.get(f"{API_URL}/vocabulary/?limit=1", timeout=5.0)
+            data = res.json()
+            total = data.get('total', 0)
+
+            if total == 0:
+                await message.answer("🧠 So'z topilmadi")
+                return
+
+            offset = random.randint(0, total - 1)
+            res = await client.get(
+                f"{API_URL}/vocabulary/?limit=1&offset={offset}", timeout=5.0
+            )
             data = res.json()
             words = data.get('words', [])
         except Exception:
@@ -268,6 +295,27 @@ async def flashcard(message: types.Message):
         return
 
     word = words[0]
+
+    # So'zni foydalanuvchi shaxsiy vocabularysiga qo'shamiz (mavjud bo'lsa — backend
+    # o'zi "already_exists" qaytaradi, xato bermaydi). Shu qadamsiz keyingi review
+    # chaqiruvi 404 bilan qaytadi.
+    async with httpx.AsyncClient() as client:
+        try:
+            await client.post(
+                f"{API_URL}/vocabulary/user/add",
+                json={
+                    "telegram_id": telegram_id,
+                    "vocab_id": word['id'],
+                    "source": "bot",
+                },
+                headers=API_HEADERS,
+                timeout=5.0,
+            )
+        except Exception as e:
+            print(f"Vocab qo'shishda xato: {e}")
+
+    # "Bildim"/"Bilmadim" bosilganda qaysi so'z haqida ekanini bilish uchun eslab qolamiz
+    last_shown_word[telegram_id] = word['id']
 
     keyboard = ReplyKeyboardMarkup(
         keyboard=[
@@ -299,8 +347,27 @@ async def flashcard(message: types.Message):
     )
 
 
+async def _save_review(telegram_id: int, correct: bool):
+    """So'z natijasini backend SM-2 tizimiga yozadi (bot ham, webapp ham shu manbadan o'qiydi)."""
+    vocab_id = last_shown_word.get(telegram_id)
+    if not vocab_id:
+        return
+
+    async with httpx.AsyncClient() as client:
+        try:
+            await client.patch(
+                f"{API_URL}/vocabulary/user/{telegram_id}/{vocab_id}/review",
+                json={"correct": correct},
+                headers=API_HEADERS,
+                timeout=5.0,
+            )
+        except Exception as e:
+            print(f"Review saqlashda xato: {e}")
+
+
 @dp.message(F.text == "✅ Bildim")
 async def correct(message: types.Message):
+    await _save_review(message.from_user.id, correct=True)
     await message.answer(
         "🎉 Zo'r! +10 XP\n\n"
         "🔔 Bu so'z Ebbinghaus jadvaliga qo'shildi.\n"
@@ -311,6 +378,7 @@ async def correct(message: types.Message):
 
 @dp.message(F.text == "❌ Bilmadim")
 async def wrong(message: types.Message):
+    await _save_review(message.from_user.id, correct=False)
     await message.answer(
         "💪 Xavotir olma! Takrorlash yordam beradi.\n\n"
         "🔔 Bu so'z eslatma jadvaliga qo'shildi.",

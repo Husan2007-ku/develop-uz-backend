@@ -6,14 +6,14 @@ from sqlalchemy.orm import (
 )
 from app.core.config import settings
 
-# aiopg o'rniga oddiy psycopg2
 DATABASE_URL = settings.DATABASE_URL.replace(
     "postgresql+aiopg", "postgresql"
 ).replace(
     "postgresql+asyncpg", "postgresql"
 )
 
-engine = create_engine(DATABASE_URL, echo=True)
+# echo faqat development muhitida yoqiladi — productionda SQL loglanmaydi
+engine = create_engine(DATABASE_URL, echo=not settings.is_production)
 
 SessionLocal = sessionmaker(
     autocommit=False,
@@ -21,8 +21,10 @@ SessionLocal = sessionmaker(
     bind=engine
 )
 
+
 class Base(DeclarativeBase):
     pass
+
 
 def get_db():
     db = SessionLocal()

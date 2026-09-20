@@ -1,6 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException
+from datetime import datetime
+
+from fastapi import APIRouter, Depends, HTTPException, Header
 from sqlalchemy.orm import Session
 from app.core.database import get_db
+from app.core.security import verify_owner_or_bot, is_trusted_bot, _check_telegram_signature
+from app.core.config import settings
 from app.schemas import UserCreate, UserResponse
 from app.services import (
     get_or_create_user,
@@ -9,7 +13,7 @@ from app.services import (
 )
 from app.models.models import (
     Essay, Vocabulary, Topic,
-    EssayHighlight, UserEssayNote
+    EssayHighlight, UserEssayNote, User, UserVocabulary
 )
 
 # ─── USERS ────────────────────────────────
@@ -17,13 +21,29 @@ router = APIRouter(prefix="/users", tags=["Users"])
 
 
 @router.post("/", response_model=UserResponse)
-def register_user(user_data: UserCreate, db: Session = Depends(get_db)):
+def register_user(
+    user_data: UserCreate,
+    db: Session = Depends(get_db),
+    x_telegram_init_data: str | None = Header(default=None),
+    x_bot_secret: str | None = Header(default=None),
+):
+    # Ro'yxatdan o'tish faqat: (a) bot o'zi chaqirsa, yoki (b) Mini App orqali
+    # foydalanuvchi o'zini-o'zi ro'yxatdan o'tkazsa (soxta ID bilan boshqa
+    # birov nomidan akkaunt ochib bo'lmaydi).
+    verify_owner_or_bot(user_data.telegram_id, x_telegram_init_data, x_bot_secret)
     user, is_new = get_or_create_user(db, user_data)
     return user
 
 
 @router.get("/{telegram_id}", response_model=UserResponse)
-def get_user(telegram_id: int, db: Session = Depends(get_db)):
+def get_user(
+    telegram_id: int,
+    db: Session = Depends(get_db),
+    x_telegram_init_data: str | None = Header(default=None),
+    x_bot_secret: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+):
+    verify_owner_or_bot(telegram_id, x_telegram_init_data, x_bot_secret, authorization)
     user = get_user_by_telegram_id(db, telegram_id)
     if not user:
         raise HTTPException(status_code=404, detail="Foydalanuvchi topilmadi")
@@ -31,7 +51,14 @@ def get_user(telegram_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/{telegram_id}/stats")
-def get_stats(telegram_id: int, db: Session = Depends(get_db)):
+def get_stats(
+    telegram_id: int,
+    db: Session = Depends(get_db),
+    x_telegram_init_data: str | None = Header(default=None),
+    x_bot_secret: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+):
+    verify_owner_or_bot(telegram_id, x_telegram_init_data, x_bot_secret, authorization)
     stats = get_user_stats(db, telegram_id)
     if not stats:
         raise HTTPException(status_code=404, detail="Foydalanuvchi topilmadi")
@@ -52,6 +79,7 @@ def get_essays(
     offset: int = 0,
     db: Session = Depends(get_db)
 ):
+    # Ochiq endpoint - essaylar ro'yxatini har kim ko'rishi mumkin (auth kerak emas)
     query = db.query(Essay)
     if topic_id:
         query = query.filter(Essay.topic_id == topic_id)
@@ -121,9 +149,13 @@ def get_essay(essay_id: int, db: Session = Depends(get_db)):
 def get_essay_notes(
     essay_id: int,
     telegram_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    x_telegram_init_data: str | None = Header(default=None),
+    x_bot_secret: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ):
-    from app.models.models import User
+    verify_owner_or_bot(telegram_id, x_telegram_init_data, x_bot_secret, authorization)
+
     user = db.query(User).filter(
         User.telegram_id == telegram_id
     ).first()
@@ -149,10 +181,12 @@ def save_essay_notes(
     essay_id: int,
     telegram_id: int,
     data: dict,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    x_telegram_init_data: str | None = Header(default=None),
+    x_bot_secret: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ):
-    from app.models.models import User
-    from datetime import datetime
+    verify_owner_or_bot(telegram_id, x_telegram_init_data, x_bot_secret, authorization)
 
     user = db.query(User).filter(
         User.telegram_id == telegram_id
@@ -194,6 +228,7 @@ def get_vocabulary(
     offset: int = 0,
     db: Session = Depends(get_db)
 ):
+    # Ochiq endpoint - vocabulary ro'yxati hammaga ko'rinadi
     query = db.query(Vocabulary)
     if cefr_level:
         query = query.filter(Vocabulary.cefr_level == cefr_level)
@@ -247,6 +282,7 @@ def search_vocabulary(query: str, db: Session = Depends(get_db)):
 
 @vocab_router.get("/daily/{telegram_id}")
 def get_daily_vocab(telegram_id: int, db: Session = Depends(get_db)):
+    # Shaxsiy ma'lumot qaytarmaydi (hammaga bir xil so'zlar), shuning uchun auth shart emas
     words = db.query(Vocabulary).limit(10).all()
     return {
         "words": [
@@ -279,16 +315,23 @@ def get_topics(db: Session = Depends(get_db)):
         }
         for t in topics
     ]
+
+
 @vocab_router.post("/user/add")
 def add_to_user_vocab(
     data: dict,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    x_telegram_init_data: str | None = Header(default=None),
+    x_bot_secret: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ):
-    from app.models.models import User, UserVocabulary
-    from datetime import datetime
-
     telegram_id = data.get("telegram_id")
     vocab_id = data.get("vocab_id")
+
+    if telegram_id is None:
+        raise HTTPException(status_code=400, detail="telegram_id talab qilinadi")
+
+    verify_owner_or_bot(int(telegram_id), x_telegram_init_data, x_bot_secret, authorization)
 
     user = db.query(User).filter(
         User.telegram_id == telegram_id
@@ -320,9 +363,12 @@ def add_to_user_vocab(
 @vocab_router.get("/user/{telegram_id}")
 def get_user_vocab(
     telegram_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    x_telegram_init_data: str | None = Header(default=None),
+    x_bot_secret: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ):
-    from app.models.models import User, UserVocabulary
+    verify_owner_or_bot(telegram_id, x_telegram_init_data, x_bot_secret, authorization)
 
     user = db.query(User).filter(
         User.telegram_id == telegram_id
